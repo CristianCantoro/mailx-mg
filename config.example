@@ -1,0 +1,3 @@
+MAILGUN_API_VERSION=v3
+MAILGUN_API_KEY=key-aaaaaa
+MAILGUN_DOMAIN=mg.example.org

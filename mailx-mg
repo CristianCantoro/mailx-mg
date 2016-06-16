@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+
+# This script is based on:
+# https://gist.github.com/mrw34/e956c0951238c15a7e88
+#
+# see also:
+# http://blog.jpalardy.com/posts/sending-html-to-mailgun-with-curl/
+
+# Initialize CLI flags
+to_addr=()
+a=''
+b=''
+has_bcc=false
+declare -a bcc_addrs
+c=''
+has_cc=false
+declare -a cc_addrs
+C=''
+config_file=''
+E=true
+r=''
+s=''
+V=false
+version=false
+
+eval "$(docopts -h - : "$@" <<EOF
+Usage:
+     mailx-mg [-dEv] [-C <config-file>] [-s <subject>] [-a <attachment>]
+              [-c <cc-addrs>] [-b <bcc-addrs>] [-r <from-addr>] <to-addr>...
+     mailx-mg ( -h | --help )
+     mailx-mg ( -V | --version )
+
+Options:
+    -a attachment
+        Attach the given file to the message.
+
+    -b bcc-addrs
+        Send blind carbon copies to list. List should be a comma-separated
+        list of names.
+
+    -c cc-addrs
+        Send carbon copies to list of users.
+
+    -C config-file
+        Specify config file [default: /etc/mailx-mg/config]
+
+    -d
+        Enables debugging messages and disables the actual delivery of messages.
+        Unlike -v, this option is intended for mailx-mg development only.
+
+    -E
+        If an outgoing message does not contain any text in its first or only
+        message part, do not send it but discard it silently, effectively
+        setting the skipemptybody variable at program startup. This is useful
+        for sending messages from scripts started by cron(8).
+
+    -H
+        Print header summaries for all messages and exit.
+
+    -r from-addr
+        Sets the From address. Overrides any from variable specified in
+        environment or startup files. Tilde escapes are disabled. The -r
+        address options are passed to the mail transfer agent unless SMTP is
+        used. This option exists for compatibility only; it is recommended to
+        set the from variable directly instead.
+
+    -s subject
+        Specify subject on command line (only the first argument after the -s
+        flag is used as a subject; be careful to quote subjects containing
+        spaces).
+
+    -v
+        Verbose mode. The details of delivery are displayed on the user's
+        terminal.
+
+    -V
+        Print mailx's version and exit.
+EOF
+)"
+
+read -r -d '' version_string <<"EOF"
+----
+mailx-mg 0.1.0
+copyright (c) 2016 Cristian Consonni
+MIT License
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+EOF
+
+# Set "bash strict" mode
+# See:
+# http://redsymbol.net/articles/unofficial-bash-strict-mode/
+set -euo pipefail
+IFS=$'\n\t'
+
+if $V || $version ; then
+    echo "$version_string"
+    exit 0
+fi
+
+# set default values in config array
+declare -A config
+config=(
+    [MAILGUN_API_VERSION]="v3"
+    [MAILGUN_API_KEY]=""
+    [MAILGUN_DOMAIN]=""
+)
+
+function read_config () {
+
+    local _reach_eof=false
+    local line=""
+
+    until $_reach_eof ;do
+        read -r line || _reach_eof=true
+
+        # skip empty line and lines starting with #
+        [[ -z "${line// }" ]] && continue
+        [[ "$line" =~ ^#.*$ ]] && continue
+
+        if echo "$line" | grep -F = &>/dev/null; then
+            varname=$(echo "$line" | cut -d '=' -f 1)
+            config[$varname]=$(echo "$line" | cut -d '=' -f 2-)
+        fi
+    done < "$1"
+
+    unset _reach_eof
+    unset line
+
+} 
+
+function read_list_arg () {
+    local _old_IFS="$IFS"
+    
+    IFS=',' read -ra "$2" <<< "$1"
+    IFS=$_old_IFS
+
+    unset _old_IFS
+
+}
+
+config_file=$C
+read_config "$config_file"
+
+cmd="curl -s --user 'api:${config[MAILGUN_API_KEY]}' "
+cmd+="https://api.mailgun.net/${config[MAILGUN_API_VERSION]}/${config[MAILGUN_DOMAIN]}/messages"
+
+if [[ ! -z "$s" ]]; then
+    cmd+=" -F subject='$s'"
+fi
+
+if [[ ! -z "$r" ]]; then
+    cmd+=" -F from='$r'"
+fi
+
+if [[ ! -z "$c" ]]; then
+    read_list_arg "$c" "cc_addrs"
+    has_cc=true
+fi
+
+if $has_cc; then
+    for addr in "${cc_addrs[@]}"; do
+        cmd+=" -F cc='$addr'"
+    done
+fi
+
+if [[ ! -z "$b" ]]; then
+    read_list_arg "$b" "bcc_addrs"
+    has_bcc=true
+fi
+
+if $has_bcc; then
+    for addr in "${bcc_addrs[@]}"; do
+        cmd+=" -F bcc='$addr'"
+    done
+fi
+
+for addr in "${to_addr[@]}"; do
+    cmd+=" -F to='$addr'"
+done
+
+if [[ ! -z "$a" ]]; then
+    cmd+=" -F attachment=@$a"
+fi
+
+stdin=$(</dev/stdin)
+
+[[ -z ${E-} ]] && [[ -z $stdin ]] && exit
+
+cmd+=" -F text='$stdin'"
+
+eval "$cmd" >/dev/null
